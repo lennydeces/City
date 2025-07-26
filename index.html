@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Map with Excel Upload and Chart Export</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <!-- Font Awesome for icons (retained in case needed elsewhere, but unused now) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" integrity="sha512-z3gLpd7yknf1YoNbCzqRKc4qyor8gaKU1qmn+CShxbuBusANI9QpRohGBreCFkKxLhei6S9CQXFEbbKuqLg0DA==" crossorigin="anonymous"/>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- SheetJS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <!-- Select2 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+    <!-- Select2 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        #map {
+            height: 60vh;
+            width: 100%;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            width: auto;
+        }
+        #chart-container {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            width: 100%;
+            max-width: 300px;
+            height: auto;
+            max-height: 300px;
+            display: none;
+            overflow: hidden;
+        }
+        #radarChart {
+            width: 100% !important;
+            height: 100% !important;
+        }
+        #sheet-filter, #state-filter, #property-filter, #chart-type, input[type="file"], button {
+            margin: 5px 0;
+            padding: 5px;
+            width: 200px;
+            box-sizing: border-box;
+        }
+        #controls label {
+            display: block;
+            margin: 5px 0;
+        }
+        .popup-content {
+            font-size: 12px;
+            text-align: center;
+            max-width: 150px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            display: block;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .select2-container {
+            width: 200px !important;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="excel-file">Upload Excel File:</label>
+        <input type="file" id="excel-file" accept=".xlsx, .xls">
+        <label for="sheet-filter">Select Sheet:</label>
+        <select id="sheet-filter" disabled>
+            <option value="none">Upload a file first</option>
+        </select>
+        <label for="state-filter">Filter by State:</label>
+        <select id="state-filter" class="js-multi-select" multiple>
+            <option value="all">All States</option>
+        </select>
+        <label for="property-filter">Select Properties to Display:</label>
+        <select id="property-filter" class="js-multi-select" multiple>
+            <option value="Safety">Safety</option>
+            <option value="Health">Health</option>
+            <option value="Environment">Environment</option>
+            <option value="Transportation">Transportation</option>
+            <option value="Museum">Museum</option>
+            <option value="Attraction">Attraction</option>
+            <option value="Food">Food</option>
+        </select>
+        <label for="chart-type">Select Chart Type:</label>
+        <select id="chart-type">
+            <option value="none">None</option>
+            <option value="radar">Radar Chart</option>
+            <option value="bar">Bar Plot</option>
+            <option value="pie">Pie Chart</option>
+            <option value="donut">Donut Chart</option>
+        </select>
+        <button id="export-chart-btn">Export Chart as PNG</button>
+    </div>
+    <div id="chart-container">
+        <canvas id="radarChart"></canvas>
+    </div>
+    <div id="map"></div>
+
+    <!-- Leaflet JavaScript -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script>
+        // Initialize Select2
+        $(document).ready(function() {
+            $('.js-multi-select').select2({
+                placeholder: "Select options",
+                closeOnSelect: false
+            });
+        });
+
+        // Initialize the map
+        const map = L.map('map').setView([37.0902, -95.7129], 4);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: 'Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // Initialize Chart.js canvas
+        const ctx = document.getElementById('radarChart').getContext('2d');
+        let chartInstance = null;
+
+        // Layer group for markers
+        let markers = L.layerGroup().addTo(map);
+        let citiesData = [];
+        let selectedCities = [];
+
+        // Handle Excel file upload
+        document.getElementById('excel-file').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const data = new Uint8Array(event.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+
+                    // Populate sheet filter dropdown
+                    const sheetFilter = document.getElementById('sheet-filter');
+                    sheetFilter.innerHTML = '<option value="none">Select a sheet</option>';
+                    workbook.SheetNames.forEach(sheetName => {
+                        const option = document.createElement('option');
+                        option.value = sheetName;
+                        option.textContent = sheetName;
+                        sheetFilter.appendChild(option);
+                    });
+                    sheetFilter.disabled = false;
+
+                    // Reset state filter and cities data
+                    $('#state-filter').val('all').trigger('change.select2');
+                    citiesData = [];
+                    markers.clearLayers();
+                    selectedCities = [];
+                    updateChart();
+                } catch (error) {
+                    console.error('Error reading Excel file:', error);
+                    alert('Failed to process Excel file. Please ensure it is a valid .xlsx or .xls file.');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // Handle sheet selection
+        document.getElementById('sheet-filter').addEventListener('change', (e) => {
+            const sheetName = e.target.value;
+            if (sheetName === 'none') {
+                citiesData = [];
+                markers.clearLayers();
+                selectedCities = [];
+                updateChart();
+                $('#state-filter').val('all').trigger('change.select2');
+                return;
+            }
+
+            try {
+                const file = document.getElementById('excel-file').files[0];
+                if (!file) {
+                    alert('Please upload an Excel file first.');
+                    e.target.value = 'none';
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const data = new Uint8Array(event.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const worksheet = workbook.Sheets[sheetName];
+                        if (!worksheet) {
+                            throw new Error('Selected sheet not found.');
+                        }
+
+                        citiesData = XLSX.utils.sheet_to_json(worksheet);
+
+                        // Validate and normalize data
+                        citiesData = citiesData.map(city => ({
+                            state: city.State || 'Unknown',
+                            city: city.City || 'Unknown',
+                            lat: parseFloat(city.Latitude) || 0,
+                            lng: parseFloat(city.Longitude) || 0,
+                            Safety: parseFloat(city.Safety) || 1,
+                            Health: parseFloat(city.Health) || 1,
+                            Environment: parseFloat(city.Environment) || 1,
+                            Transportation: parseFloat(city.Transportation) || 1,
+                            Museum: parseFloat(city.Museum) || 1,
+                            Attraction: parseFloat(city.Attraction) || 1,
+                            Food: parseFloat(city.Food) || 1
+                        }));
+
+                        // Update state filter dropdown
+                        const states = [...new Set(citiesData.map(city => city.state))].filter(state => state !== 'Unknown').sort();
+                        const stateFilter = document.getElementById('state-filter');
+                        stateFilter.innerHTML = '<option value="all">All States</option>';
+                        states.forEach(state => {
+                            const option = document.createElement('option');
+                            option.value = state;
+                            option.textContent = state;
+                            stateFilter.appendChild(option);
+                        });
+
+                        // Reset Select2 and update map
+                        $('#state-filter').val('all').trigger('change.select2');
+                        updateMap(getSelectedStates());
+                    } catch (error) {
+                        console.error('Error processing sheet:', error);
+                        alert('Failed to process selected sheet. Please ensure it has the correct format (columns: State, City, Latitude, Longitude, Safety, Health, Environment, Transportation, Museum, Attraction, Food).');
+                        e.target.value = 'none';
+                        citiesData = [];
+                        markers.clearLayers();
+                        selectedCities = [];
+                        updateChart();
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } catch (error) {
+                console.error('Error accessing file:', error);
+                alert('Error accessing uploaded file. Please upload the file again.');
+                e.target.value = 'none';
+            }
+        });
+
+        // Helper function to get selected states
+        function getSelectedStates() {
+            const selectedOptions = $('#state-filter').val() || ['all'];
+            return selectedOptions.includes('all') ? ['all'] : selectedOptions;
+        }
+
+        // Update map based on state filter
+        function updateMap(selectedStates) {
+            markers.clearLayers();
+
+            let filteredCities = citiesData;
+            if (selectedStates.length > 0 && !selectedStates.includes('all')) {
+                filteredCities = filteredCities.filter(city => selectedStates.includes(city.state));
+            }
+
+            if (filteredCities.length === 0) {
+                alert('No cities found in the selected sheet or states.');
+                return;
+            }
+
+            filteredCities.forEach(city => {
+                if (city.lat && city.lng && !isNaN(city.lat) && !isNaN(city.lng)) {
+                    const marker = L.marker([city.lat, city.lng])
+                        .addTo(markers)
+                        .bindPopup(`<div class="popup-content"><b>${city.city}</b><br>${city.state}<br>Safety: ${city.Safety}<br>Health: ${city.Health}<br>Environment: ${city.Environment}<br>Transportation: ${city.Transportation}<br>Museum: ${city.Museum}<br>Attraction: ${city.Attraction}<br>Food: ${city.Food}</div>`, {
+                            autoClose: false,
+                            closeOnClick: false
+                        })
+                        .on('click', () => {
+                            const index = selectedCities.findIndex(c => c.city === city.city && c.state === city.state);
+                            if (index === -1) {
+                                selectedCities.push(city);
+                                marker.openPopup();
+                            } else {
+                                selectedCities.splice(index, 1);
+                                marker.closePopup();
+                            }
+                            updateChart();
+                        });
+                }
+            });
+
+            if (filteredCities.length > 0 && !selectedStates.includes('all')) {
+                const validCity = filteredCities.find(city => city.lat && city.lng && !isNaN(city.lat) && !isNaN(city.lng));
+                if (validCity) {
+                    map.setView([validCity.lat, validCity.lng], 7);
+                } else {
+                    map.setView([37.0902, -95.7129], 4);
+                }
+            } else {
+                map.setView([37.0902, -95.7129], 4);
+            }
+        }
+
+        // Helper function to get selected properties
+        function getSelectedProperties() {
+            const selected = $('#property-filter').val() || [];
+            return selected.length > 0 ? selected : ['Safety', 'Health', 'Environment', 'Transportation', 'Museum', 'Attraction', 'Food'];
+        }
+
+        // Define color palette for features (distinct colors for each property)
+        const featureColors = {
+            Safety: [255, 99, 132], // Pink
+            Health: [54, 162, 235], // Blue
+            Environment: [75, 192, 192], // Teal
+            Transportation: [255, 206, 86], // Yellow
+            Museum: [153, 102, 255], // Purple
+            Attraction: [255, 159, 64], // Orange
+            Food: [0, 128, 0] // Green
+        };
+
+        // Define color palette for states
+        const stateColors = [
+            [255, 99, 132], // Pink
+            [54, 162, 235], // Blue
+            [75, 192, 192], // Teal
+            [255, 206, 86], // Yellow
+            [153, 102, 255], // Purple
+            [255, 159, 64], // Orange
+            [0, 128, 0] // Green
+        ];
+
+        // Generate gradient colors for cities within a state
+        function generateGradientColors(numCities, baseColor) {
+            const colors = [];
+            for (let i = 0; i < numCities; i++) {
+                const factor = 1 - (i / (numCities || 1)) * 0.4; // Lighten by up to 40%
+                const r = Math.round(baseColor[0] * factor);
+                const g = Math.round(baseColor[1] * factor);
+                const b = Math.round(baseColor[2] * factor);
+                colors.push(`rgba(${r}, ${g}, ${b}, 0.6)`);
+            }
+            return colors;
+        }
+
+        // Update chart based on selected cities and chart type
+        function updateChart() {
+            const chartContainer = document.getElementById('chart-container');
+            if (selectedCities.length === 0) {
+                chartContainer.style.display = 'none';
+                if (chartInstance) {
+                    chartInstance.destroy();
+                    chartInstance = null;
+                }
+                return;
+            }
+
+            const chartType = document.getElementById('chart-type').value;
+            const selectedProperties = getSelectedProperties();
+
+            // Destroy existing chart if it exists
+            if (chartInstance) {
+                chartInstance.destroy();
+                chartInstance = null;
+            }
+
+            // Hide chart container if no chart type is selected
+            if (chartType === 'none') {
+                chartContainer.style.display = 'none';
+                return;
+            }
+
+            // Show chart container
+            chartContainer.style.display = 'block';
+
+            const allLabels = ['Safety', 'Health', 'Environment', 'Transportation', 'Museum', 'Attraction', 'Food'];
+            const labels = allLabels.filter(label => selectedProperties.includes(label));
+
+            // Assign a color to each state
+            const stateColorMap = {};
+            const uniqueStates = [...new Set(selectedCities.map(city => city.state))];
+            uniqueStates.forEach((state, index) => {
+                stateColorMap[state] = stateColors[index % stateColors.length];
+            });
+
+            // Group cities by state and assign gradient colors
+            const citiesByState = {};
+            selectedCities.forEach(city => {
+                if (!citiesByState[city.state]) {
+                    citiesByState[city.state] = [];
+                }
+                citiesByState[city.state].push(city);
+            });
+
+            // Prepare datasets for each selected city
+            const datasets = [];
+            selectedCities.forEach((city, index) => {
+                const stateCities = citiesByState[city.state];
+                const cityIndex = stateCities.findIndex(c => c.city === city.city && c.state === city.state);
+                const baseColor = stateColorMap[city.state];
+                const cityColors = generateGradientColors(stateCities.length, baseColor);
+                const cityColor = cityColors[cityIndex] || `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, 0.6)`;
+                const borderColor = cityColor.replace('0.6', '1');
+
+                const data = labels.map(label => city[label] || 1);
+                if (chartType === 'radar') {
+                    // For radar charts, use a single color per city
+                    datasets.push({
+                        label: `${city.city}, ${city.state}`,
+                        data: data,
+                        backgroundColor: cityColor.replace('0.6', '0.2'), // Lighter for fill
+                        borderColor: borderColor,
+                        borderWidth: 1,
+                        pointRadius: 3,
+                        pointHoverRadius: 5
+                    });
+                } else {
+                    // For bar, pie, donut charts, use distinct feature colors
+                    const backgroundColors = labels.map(label => {
+                        const c = featureColors[label];
+                        return `rgba(${c[0]}, ${c[1]}, ${c[2]}, 0.6)`;
+                    });
+                    const borderColors = backgroundColors.map(c => c.replace('0.6', '1'));
+                    datasets.push({
+                        label: `${city.city}, ${city.state}`,
+                        data: data,
+                        backgroundColor: backgroundColors,
+                        borderColor: borderColors,
+                        borderWidth: 1
+                    });
+                }
+            });
+
+            // Chart title
+            const chartTitle = selectedCities.length === 1
+                ? `${chartType.charAt(0).toUpperCase() + chartType.slice(1)} Chart for ${selectedCities[0].city}, ${selectedCities[0].state}`
+                : `Comparison ${chartType.charAt(0).toUpperCase() + chartType.slice(1)} Chart for ${selectedCities.length} Cities`;
+
+            // Chart configuration based on type
+            let chartConfig = {};
+            switch (chartType) {
+                case 'radar':
+                    chartConfig = {
+                        type: 'radar',
+                        data: {
+                            labels: labels,
+                            datasets: datasets
+                        },
+                        options: {
+                            maintainAspectRatio: false,
+                            scales: {
+                                r: {
+                                    min: 1,
+                                    max: 5,
+                                    ticks: {
+                                        stepSize: 1,
+                                        display: true,
+                                        font: { size: 10 },
+                                        callback: function(value) {
+                                            if (Number.isInteger(value) && value >= 1 && value <= 5) {
+                                                return value;
+                                            }
+                                        }
+                                    },
+                                    pointLabels: {
+                                        font: { size: 10 }
+                                    }
+                                }
+                            },
+                            plugins: {
+                                title: { 
+                                    display: true, 
+                                    text: chartTitle, 
+                                    font: { size: 12 },
+                                    padding: { top: 5, bottom: 5 }
+                                },
+                                legend: { 
+                                    position: 'bottom',
+                                    labels: { font: { size: 10 } }
+                                }
+                            }
+                        }
+                    };
+                    break;
+                case 'bar':
+                    chartConfig = {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: datasets
+                        },
+                        options: {
+                            maintainAspectRatio: false,
+                            scales: {
+                                y: {
+                                    min: 1,
+                                    max: 5,
+                                    ticks: {
+                                        stepSize: 1,
+                                        font: { size: 10 },
+                                        callback: function(value) {
+                                            if (Number.isInteger(value) && value >= 1 && value <= 5) {
+                                                return value;
+                                            }
+                                        }
+                                    }
+                                },
+                                x: {
+                                    ticks: {
+                                        font: { size: 10 }
+                                    }
+                                }
+                            },
+                            plugins: {
+                                title: { 
+                                    display: true, 
+                                    text: chartTitle, 
+                                    font: { size: 12 },
+                                    padding: { top: 5, bottom: 5 }
+                                },
+                                legend: { 
+                                    position: 'bottom',
+                                    labels: { font: { size: 10 } }
+                                }
+                            }
+                        }
+                    };
+                    break;
+                case 'pie':
+                    chartConfig = {
+                        type: 'pie',
+                        data: {
+                            labels: labels,
+                            datasets: datasets
+                        },
+                        options: {
+                            maintainAspectRatio: false,
+                            plugins: {
+                                title: { 
+                                    display: true, 
+                                    text: chartTitle, 
+                                    font: { size: 12 },
+                                    padding: { top: 5, bottom: 5 }
+                                },
+                                legend: { 
+                                    position: 'bottom',
+                                    labels: { font: { size: 10 } }
+                                }
+                            }
+                        }
+                    };
+                    break;
+                case 'donut':
+                    chartConfig = {
+                        type: 'doughnut',
+                        data: {
+                            labels: labels,
+                            datasets: datasets
+                        },
+                        options: {
+                            maintainAspectRatio: false,
+                            plugins: {
+                                title: { 
+                                    display: true, 
+                                    text: chartTitle, 
+                                    font: { size: 12 },
+                                    padding: { top: 5, bottom: 5 }
+                                },
+                                legend: { 
+                                    position: 'bottom',
+                                    labels: { font: { size: 10 } }
+                                }
+                            }
+                        }
+                    };
+                    break;
+            }
+
+            try {
+                chartInstance = new Chart(ctx, chartConfig);
+            } catch (error) {
+                console.error('Error creating chart:', error);
+                chartContainer.style.display = 'none';
+                alert('Failed to render chart. Please select a different chart type or ensure cities are selected.');
+            }
+        }
+
+        // Export chart as PNG
+        document.getElementById('export-chart-btn').addEventListener('click', () => {
+            if (!chartInstance) {
+                alert('No chart available to export. Please select a chart type and at least one city.');
+                return;
+            }
+
+            try {
+                const link = document.createElement('a');
+                link.href = chartInstance.toBase64Image();
+                link.download = `chart_${selectedCities.length}_cities.png`;
+                link.click();
+            } catch (error) {
+                console.error('Error exporting chart:', error);
+                alert('Failed to export chart. Please ensure a chart is displayed.');
+            }
+        });
+
+        // Event listeners for filters
+        $('#state-filter').on('change', () => {
+            updateMap(getSelectedStates());
+        });
+
+        $('#property-filter').on('change', () => {
+            updateChart();
+        });
+
+        document.getElementById('chart-type').addEventListener('change', () => {
+            updateChart();
+        });
+    </script>
+</body>
+</html>
